@@ -95,7 +95,31 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi0_agibot --exp-name
 
 ### 7. 异地新设备一键拉起部署指南
 为了防止明天在新电脑上测试时出现依赖环境错乱问题，请直接遵守以下环境原生重构流程：
-1. **拉取纯净代码**：`git clone https://github.com/Tito-11/openpi_agibot.git`
-2. **下载并归位权重**：从个人云盘下载 `28000` 步训练收敛权重，新建目录结构放入 `/checkpoints/pi0_agibot/agibot_routeB_lora_tuning/28000/` 内。
-3. **原生重建虚拟环境**：于主目录下执行 `uv pip install -e .`。该命令会根据新电脑的架构，干净地自动生成 `.venv` 并处理好底层系统与 JAX 包等一切依赖。
-4. **直接执行推理**：执行 `uv run agi_bot/run_inference.py` 测试。
+
+**第一步：在旧机器压缩导出权重**
+```bash
+# 于项目主目录下执行，将指定权重打包压缩，以便安全且快速地上云盘
+tar -czvf agibot_checkpoint_28000.tar.gz -C checkpoints/pi0_agibot/agibot_routeB_lora_tuning 28000
+```
+把生成的 `agibot_checkpoint_28000.tar.gz` 上传至个人云盘。
+
+**第二步：在新机器拉取纯净代码并接管环境**
+```bash
+git clone https://github.com/Tito-11/openpi_agibot.git
+cd openpi_agibot
+# 原生重建虚拟环境：此命令会根据新电脑底层架构，干净自动生成 .venv 并处理好 JAX 与链接库等依赖。
+uv pip install -e .
+```
+
+**第三步：在新机器解压还原权重**
+从个人云盘下载 `agibot_checkpoint_28000.tar.gz` 到项目主目录，执行：
+```bash
+mkdir -p checkpoints/pi0_agibot/agibot_routeB_lora_tuning/
+tar -xzvf agibot_checkpoint_28000.tar.gz -C checkpoints/pi0_agibot/agibot_routeB_lora_tuning/
+```
+此操作将自动生成 `/checkpoints/pi0_agibot/agibot_routeB_lora_tuning/28000/` 的纯净架构。
+
+**第四步：直接执行推理验证**
+```bash
+uv run agi_bot/run_inference.py
+```
