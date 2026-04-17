@@ -90,4 +90,12 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi0_agibot --exp-name
 ### 6. 代码版本控制与跨设备迁移 (2026-04-17)
 - **GitHub 远端托管**: 已通过 `git push` 将除 `checkpoints/` 和 `data/` 以外的所有核心代码、配置文件和推理脚本成功同步至 GitHub 仓库 (`https://github.com/Tito-11/openpi_agibot.git`)。
 - **配置白名单**: 仓库中的 `.gitignore` 规则成功拦截了大体积二进制文件（包含模型权重和训练数据集），避免触发 GitHub 的 100MB 单文件限制。
+- **跨平台环境配置说明**: 绝对不可将当前机器的 `.venv`、本地缓存 `.pytest_cache` 以及日志 `wandb/` 上传至 GitHub，因为包含了宿主机的系统绝对路径以及特定架构的 C++ 动态链接库。在新设备上需要**原生的环境重建**。
 - **权重提取与云盘流转**: 训练在约 28000 步左右参数完全收敛，已在此提取最高质量权重 `checkpoints/pi0_agibot/agibot_routeB_lora_tuning/28000` 文件夹并上传至个人云盘，明天的物理跨机器设备推理测试将直接从此存档加载。
+
+### 7. 异地新设备一键拉起部署指南
+为了防止明天在新电脑上测试时出现依赖环境错乱问题，请直接遵守以下环境原生重构流程：
+1. **拉取纯净代码**：`git clone https://github.com/Tito-11/openpi_agibot.git`
+2. **下载并归位权重**：从个人云盘下载 `28000` 步训练收敛权重，新建目录结构放入 `/checkpoints/pi0_agibot/agibot_routeB_lora_tuning/28000/` 内。
+3. **原生重建虚拟环境**：于主目录下执行 `uv pip install -e .`。该命令会根据新电脑的架构，干净地自动生成 `.venv` 并处理好底层系统与 JAX 包等一切依赖。
+4. **直接执行推理**：执行 `uv run agi_bot/run_inference.py` 测试。
