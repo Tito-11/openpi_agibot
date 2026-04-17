@@ -86,3 +86,8 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi0_agibot --exp-name
 - **部署指南**: [agi_bot/README_INFERENCE.md](agi_bot/README_INFERENCE.md)
   - 通过 `pi0_agibot` config 调用 `.infer()`，构建了基于当前检查点的纯 Numpy / JAX Array 数组的测试伪造输入 (`observation/image`, `observation/wrist_image`, `observation/state`)。
   - 通过 `AgibotOutputs` Transform 方法拦截 32 维的张量底层返回，顺利裁切还原成智元原装的 `np.ndarray (10, 8)` Action Chunk 动作块进行机械臂直接发包执行。
+
+### 6. 代码版本控制与跨设备迁移 (2026-04-17)
+- **GitHub 远端托管**: 已通过 `git push` 将除 `checkpoints/` 和 `data/` 以外的所有核心代码、配置文件和推理脚本成功同步至 GitHub 仓库 (`https://github.com/Tito-11/openpi_agibot.git`)。
+- **配置白名单**: 仓库中的 `.gitignore` 规则成功拦截了大体积二进制文件（包含模型权重和训练数据集），避免触发 GitHub 的 100MB 单文件限制。
+- **权重提取与云盘流转**: 训练在约 28000 步左右参数完全收敛，已在此提取最高质量权重 `checkpoints/pi0_agibot/agibot_routeB_lora_tuning/28000` 文件夹并上传至个人云盘，明天的物理跨机器设备推理测试将直接从此存档加载。
