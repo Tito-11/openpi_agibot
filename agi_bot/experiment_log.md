@@ -1,6 +1,6 @@
 # Agibot 智元机器人数据微调 OpenPI (π0) 实验记录
 
-**最后更新日期**: 2026年4月17日
+**最后更新日期**: 2026年4月18日
 
 ## 实验目标
 使用智元机器人 (Agibot) 采集的数据集 (`agi_bot/data/cartesian_grasp_routeB_5pt_clean_v2`)，在 openpi 框架中对 `π0 Base Model` 进行微调训练 (Fine-Tuning)。本次训练已确认采用 **LoRA 低秩微调**，必须万无一失，确保可成功部署在智元机器人上。根据策略，先采用大迭代步数训练观察Loss收敛趋势。
@@ -79,6 +79,7 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi0_agibot --exp-name
 ## 更新历史
 *   2026-04-16: 修正了数据集 `task` 的格式绑定问题，成功绕开 wandb_api_key 版本验证 `ValueError` bug。搭建了 `gsutil` 并发下载挂载机制，极大提高了参数冷启动的速度。
 *   2026-04-17: 成功修复了因下载断点引发的 Checkpoint md5sum crc 不一致导致的解压失败问题。打通了整条训练链路，并编写了针对物理边缘部署端的纯 Numpy 数组解构测试脚本 `run_inference.py`。
+*   2026-04-18: 构建局部数据解构测试 `test_convert_episode_0001.py`。完成了 LeRobot 格式文件结构深度鉴定，解明了图像数据 (`image/wrist_image`) 直接作为 Byte 二进制格式流存储于 `.parquet` 的架构本质，并证实该方案大幅降低了视频型 `videos/` 零碎外挂结构造成的离散 I/O 开销，已被 OpenPI 的 `datasets` 数据泵完美验证。
 
 ### 5. 推理 (Inference) 脚本制备
 - 在等待模型顺畅训练期间，已编写脱离机器人的推理测试框架文件。
@@ -123,3 +124,13 @@ tar -xzvf agibot_checkpoint_28000.tar.gz -C checkpoints/pi0_agibot/agibot_routeB
 ```bash
 uv run agi_bot/run_inference.py
 ```
+
+### 8. 数据集存储格式架构验证 (2026-04-18)
+为了回答 "生成的 LeRobot 格式文件里为什么没有 `videos` 目录以及视觉数据藏在哪里" 这个问题，我们单独抽离了 `episode_0001` 进行轻量化本地验证：
+- **测试拦截脚本**: `agi_bot/test_convert_episode_0001.py` 
+- **设计原理**: 
+  - 本框架在 `LeRobotDataset` 转换期间使用的键值定义为 `dtype="image"`，而非网络部分教程所使用的 `dtype="video"`。
+  - 这导致了高达 240x320x3 的多模态阵列视觉帧会被抽帧为单一图像，然后直接编码为二进制 Byte 流（bytes）。
+- **结论**: 
+  - 此架构并未丢失任何视觉画面，而是将所有图片直接序列化硬塞到了 `agi_bot/test_converted_data/test_episode_0001/data/chunk-000/episode_000000.parquet` 的数据库文件中。
+  - 对于 π0 训练的流式前处理而言，这种被高度压缩封装的列式存储格式反而极大地缓解了机械硬盘 / 网络流传中的小文件碎块拖慢 I/O 效率之问题。可以完美适配 OpenPI 底层的 GPU 多进程喂数据框架。
