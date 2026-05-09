@@ -12,4 +12,4 @@ openpi官方README：/home/fudan222/ct/openpi_agibot/README.md
 action_horizon ：预测动作块的长度。通常设置为 10 到 50 。
 冻结主干网络（PaliGemma），仅微调 Action Expert。
 夹爪数据只有0和1，分别表示不夹爪和夹爪，需要处理。
-末端位姿使用6d旋转矩阵。6d旋转矩阵效果最好且不用归一化。
+末端位姿使用6d旋转矩阵。6d旋转矩阵效果最好且不用归一化。同时方便用delta pos训练。

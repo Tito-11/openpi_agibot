@@ -379,13 +379,30 @@ class LeRobotAgibotDataConfig(DataConfigFactory):
             outputs=[agibot_policy.AgibotOutputs()],
         )
 
-        # Apply a transform to convert actions to deltas if desired. Currently using raw actions based on original.
-        # Assuming raw inputs are already deltas, similar to Libero, or we could add DeltaActions here if needed.
+        # Apply Delta transform to first 9 dims (XYZ + 6D Rot)
+        delta_action_mask = _transforms.make_bool_mask(9, -1)
+        data_transforms = data_transforms.push(
+            inputs=[_transforms.DeltaActions(mask=delta_action_mask)],
+            outputs=[_transforms.AbsoluteActions(mask=delta_action_mask)],
+        )
 
         model_transforms = ModelTransformFactory()(model_config)
 
+        base_config = self.create_base_config(assets_dirs, model_config)
+        
+        # Disable normalization for 6D Rotation (dims 3..8) and Gripper (dim 9)
+        norm_stats = base_config.norm_stats
+        if norm_stats is not None:
+            import numpy as np
+            for key in ["state", "actions"]:
+                if key in norm_stats:
+                    stats = norm_stats[key]
+                    if stats.mean is not None and stats.mean.shape[-1] >= 10:
+                        stats.mean[..., 3:10] = 0.0
+                        stats.std[..., 3:10] = 1.0 - 1e-6
+
         return dataclasses.replace(
-            self.create_base_config(assets_dirs, model_config),
+            base_config,
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
@@ -697,15 +714,6 @@ _CONFIGS = [
         data=LeRobotAgibotDataConfig(
             repo_id="agibot_routeB",
             base_config=DataConfig(prompt_from_task=True),
-        ),
-        data_transforms=_transforms.Group(
-            inputs=[
-                agibot_policy.AgibotInputs(),
-                # 对前9个维度 (x,y,z, 和 6D旋转矩阵) 进行 Delta 增量转换
-                # 第10维的夹爪 (gripper) 保持绝对值
-                _transforms.StateActionToDelta(action_dim=9),
-            ],
-            outputs=[agibot_policy.AgibotOutputs()],
         ),
         batch_size=32,
         lr_schedule=_optimizer.CosineDecaySchedule(
