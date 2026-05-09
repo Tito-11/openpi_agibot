@@ -1,50 +1,45 @@
 import dataclasses
-import einops
 import numpy as np
-
 from openpi import transforms
 from openpi.models import model as _model
 
-def _parse_image(image) -> np.ndarray:
-    image = np.asarray(image)
-    if np.issubdtype(image.dtype, np.floating):
-        image = (255 * image).astype(np.uint8)
-    if image.shape[0] == 3:
-        image = einops.rearrange(image, "c h w -> h w c")
-    return image
-
 @dataclasses.dataclass(frozen=True)
 class AgibotInputs(transforms.DataTransformFn):
-    model_type: _model.ModelType
-
+    """
+    Transforms for Agibot input data (10-dim with 6D rotation).
+    Ensures that the gripper (10th dimension, index 9) is strictly within [0.0, 1.0].
+    """
     def __call__(self, data: dict) -> dict:
-        base_image = _parse_image(data["observation/image"])
-        wrist_image = _parse_image(data["observation/wrist_image"])
-
-        inputs = {
-            "state": data["observation/state"],
-            "image": {
-                "base_0_rgb": base_image,
-                "left_wrist_0_rgb": wrist_image,
-                "right_wrist_0_rgb": np.zeros_like(base_image),
-            },
-            "image_mask": {
-                "base_0_rgb": np.True_,
-                "left_wrist_0_rgb": np.True_,
-                "right_wrist_0_rgb": np.True_ if self.model_type == _model.ModelType.PI0_FAST else np.False_,
-            },
-        }
-
+        # Clip gripper state and action to [0, 1]
+        # actions shape: (horizon, 10), state shape: (10,)
+        
+        # State: [3 pos, 6 rot, 1 gripper]
+        if "state" in data:
+            state = np.asarray(data["state"])
+            state[9] = np.clip(state[9], 0.0, 1.0)
+            data["state"] = state
+            
+        # Actions: [horizon, 3 pos, 6 rot, 1 gripper]
         if "actions" in data:
-            inputs["actions"] = data["actions"]
-
-        if "prompt" in data:
-            inputs["prompt"] = data["prompt"]
-
-        return inputs
+            actions = np.asarray(data["actions"])
+            actions[..., 9] = np.clip(actions[..., 9], 0.0, 1.0)
+            data["actions"] = actions
+            
+        return data
 
 @dataclasses.dataclass(frozen=True)
 class AgibotOutputs(transforms.DataTransformFn):
+    """
+    Transforms for Agibot output data.
+    Takes the 32-dim raw model output and slices it down to the 10-dim Agibot action space.
+    The continuous gripper prediction is thresholded into 0 or 1.
+    """
     def __call__(self, data: dict) -> dict:
-        # Agibot has action dimension 8
-        return {"actions": np.asarray(data["actions"][:, :8])}
+        # The model outputs a 32-dim array by default, but our action space is 10.
+        actions = np.asarray(data["actions"][..., :10])
+        
+        # Binarize gripper output (0 or 1) using 0.5 as threshold
+        # Since Flow Matching generates continuous outputs, we must hard-threshold the discrete gripper.
+        actions[..., 9] = np.where(actions[..., 9] > 0.5, 1.0, 0.0)
+        
+        return {"actions": actions}

@@ -17,8 +17,8 @@ import openpi.models.model as _model
 import openpi.models.pi0_config as pi0_config
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
-import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.agibot_policy as agibot_policy
+import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
@@ -691,12 +691,21 @@ _CONFIGS = [
             pi05=False, 
             action_horizon=10, 
             discrete_state_input=False,
-            paligemma_variant="gemma_2b_lora", 
-            action_expert_variant="gemma_300m_lora"
+            paligemma_variant="gemma_2b",  # 取消 _lora，意味着完全不引入微调层
+            action_expert_variant="gemma_300m_lora" # 仅给 Action Expert 引入微调层
         ),
         data=LeRobotAgibotDataConfig(
             repo_id="agibot_routeB",
             base_config=DataConfig(prompt_from_task=True),
+        ),
+        data_transforms=_transforms.Group(
+            inputs=[
+                agibot_policy.AgibotInputs(),
+                # 对前9个维度 (x,y,z, 和 6D旋转矩阵) 进行 Delta 增量转换
+                # 第10维的夹爪 (gripper) 保持绝对值
+                _transforms.StateActionToDelta(action_dim=9),
+            ],
+            outputs=[agibot_policy.AgibotOutputs()],
         ),
         batch_size=32,
         lr_schedule=_optimizer.CosineDecaySchedule(
@@ -710,7 +719,7 @@ _CONFIGS = [
             pi05=False, 
             action_horizon=10, 
             discrete_state_input=False,
-            paligemma_variant="gemma_2b_lora", 
+            paligemma_variant="gemma_2b", 
             action_expert_variant="gemma_300m_lora"
         ).get_freeze_filter(),
         ema_decay=None,

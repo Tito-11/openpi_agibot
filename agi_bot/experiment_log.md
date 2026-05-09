@@ -26,10 +26,11 @@
   - **解压损坏修复**: 由于使用 `check_hashes=never`，下载被代理截断时可能会生成损坏的分片。这导致在读取 `params.PaliGemma.llm...` 时爆出 `ZSTD_decompressStream() failed` 错误。我们编写了一个 Python 脚本对比本地与云端 `gsutil ls -L` 的 MD5 值，并筛出了缺失的分片，成功找出了 `fec292...` 及 `93fcf3...` 的损坏/缺失分片，重新下载后恢复了 11.2GB Checkpoint 的完整性。
 
 ## 待完成事项
-  - 经源码追踪，`ModelTransformFactory` 已自动注入 `PadStatesAndActions`，进行零填充对齐。在推理输出端，`AgibotOutputs` 会将 32 维裁剪回 8 维以适配真机。
-- **LoRA 模式开启**:
-  - 在 `src/openpi/training/config.py` 中将 `paligemma_variant="gemma_2b_lora"` 与 `action_expert_variant="gemma_300m_lora"` 加入到模型参数结构中。
-  - 开启了 `freeze_filter` 冻结了除 LoRA 变体外的主干网络。设定 `ema_decay=None` (LoRA无须EMA参数平滑)。
+  - 经源码追踪，`ModelTransformFactory` 已自动注入 `PadStatesAndActions`，进行零填充对齐。在推理输出端，`AgibotOutputs` 会将 32 维裁剪回 10 维以适配真机。
+- **LoRA 模式开启与主干网络冻结**:
+  - 在 `src/openpi/training/config.py` 中将 `paligemma_variant="gemma_2b"` 与 `action_expert_variant="gemma_300m_lora"` 加入到模型参数结构中。
+  - **策略考量**：虽然硬件条件充裕（A100 + 4090），但由于当前抓取任务场景单一，为防止 2B 参数的 VLM 主干发生灾难性遗忘（Catastrophic Forgetting）从而丢失预训练的开阔世界视觉常识，我们决定**彻底冻结 PaliGemma**，不为其分配任何可训练参数。
+  - **实现方式**：配置 `freeze_filter` 并去掉 `paligemma_variant` 的 `_lora` 后缀。模型在训练时仅让 300M 参数的 Action Expert 适应智元机器人的动作流。设定 `ema_decay=None` (LoRA无须EMA参数平滑)。
 
 ### 3. 长周期观察训练参数设定 (30,000步)
 - 按照经验，对于机器人的复杂或未定性数据，先开启长周期的 3w 步观察 loss 的下降（通过 `wandb_enabled=True`）是最稳妥的初步动作评估法。
@@ -80,6 +81,12 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi0_agibot --exp-name
 *   2026-04-16: 修正了数据集 `task` 的格式绑定问题，成功绕开 wandb_api_key 版本验证 `ValueError` bug。搭建了 `gsutil` 并发下载挂载机制，极大提高了参数冷启动的速度。
 *   2026-04-17: 成功修复了因下载断点引发的 Checkpoint md5sum crc 不一致导致的解压失败问题。打通了整条训练链路，并编写了针对物理边缘部署端的纯 Numpy 数组解构测试脚本 `run_inference.py`。
 *   2026-04-18: 构建局部数据解构测试 `test_convert_episode_0001.py`。完成了 LeRobot 格式文件结构深度鉴定，解明了图像数据 (`image/wrist_image`) 直接作为 Byte 二进制格式流存储于 `.parquet` 的架构本质，并证实该方案大幅降低了视频型 `videos/` 零碎外挂结构造成的离散 I/O 开销，已被 OpenPI 的 `datasets` 数据泵完美验证。
+*   2026-05-09: 完善针对夹爪离散数据 (0/1) 以及四元数旋转的适配逻辑，并全面引入高质量数据清洗。
+  - **Idle 帧数据清洗**: 编写并集成了 `compute_valid_indices` 函数至转换脚本。现在会自动通过阈值 (`1e-3`) 计算平移量的变化，剔除连续静止超过 7 帧以上的无意义数据。这极大地防止了模型在预测时输出停滞不前的动作块，并大幅提升了数据纯度。
+  - **夹爪逻辑**: 编写了 `agibot_policy.py` 创建专属输入输出 Transform。在推理脚本中加入了二值化门限逻辑（大于0.5视为1）。
+  - **全面升级为 6D 旋转矩阵 (6D Rotation)**: 为了彻底解决四元数双重覆盖导致的旋转不连续问题，我们在数据转换脚本中通过 `scipy.spatial.transform.Rotation` 引入了 6D 连续旋转表示法。这使得动作空间从 8 维扩充到了 10 维。
+  - **TrainConfig 全空间 Delta 解耦**: 得益于 6D 旋转的欧几里得连续特性，我们现在可以对前 9 维（x,y,z + 6D旋转）全面启用线性增量预测 `StateActionToDelta(action_dim=9)`。第 10 维夹爪依然保留绝对值预测。
+  - **推理端还原体系**: 在 `run_inference.py` 中加入了 Gram-Schmidt 正交化算法，将神经网络预测出的 6D 向量无损还原回 3x3 旋转矩阵，并最终退回给底层控制硬件所需的 8 维 `[x,y,z, w,x,y,z, gripper]` 数组。
 
 ### 5. 推理 (Inference) 脚本制备
 - 在等待模型顺畅训练期间，已编写脱离机器人的推理测试框架文件。
@@ -87,6 +94,7 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi0_agibot --exp-name
 - **部署指南**: [agi_bot/README_INFERENCE.md](agi_bot/README_INFERENCE.md)
   - 通过 `pi0_agibot` config 调用 `.infer()`，构建了基于当前检查点的纯 Numpy / JAX Array 数组的测试伪造输入 (`observation/image`, `observation/wrist_image`, `observation/state`)。
   - 通过 `AgibotOutputs` Transform 方法拦截 32 维的张量底层返回，顺利裁切还原成智元原装的 `np.ndarray (10, 8)` Action Chunk 动作块进行机械臂直接发包执行。
+  - **夹爪动作二值化**: 由于 Flow Matching 模型输出的是连续的浮点数值，而在 Agibot 的定义中第 8 维夹爪仅接受 `0`（张开）和 `1`（闭合）。我们在推理端加入了 `np.where(actions_chunk[:, 7] > 0.5, 1.0, 0.0)` 进行硬切分二值化。
 
 ### 6. 代码版本控制与跨设备迁移 (2026-04-17)
 - **GitHub 远端托管**: 已通过 `git push` 将除 `checkpoints/` 和 `data/` 以外的所有核心代码、配置文件和推理脚本成功同步至 GitHub 仓库 (`https://github.com/Tito-11/openpi_agibot.git`)。
