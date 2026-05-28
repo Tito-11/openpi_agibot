@@ -187,7 +187,31 @@ class ResizeImages(DataTransformFn):
     width: int
 
     def __call__(self, data: DataDict) -> DataDict:
-        data["image"] = {k: image_tools.resize_with_pad(v, self.height, self.width) for k, v in data["image"].items()}
+        import numpy as np
+        def _to_numpy(x):
+            if hasattr(x, "numpy"):
+                x = x.numpy()
+            else:
+                x = np.asarray(x)
+            # Handle float arrays: scale to [0, 255] and convert to uint8
+            if x.dtype == np.float32 or x.dtype == np.float64:
+                # Assuming float images are in [0, 1] range
+                x = np.clip(x * 255.0, 0, 255).astype(np.uint8)
+            # Remove channel dimension if it is 1 (grayscale)
+            if x.ndim == 4 and x.shape[-1] == 1:
+                x = np.squeeze(x, axis=-1)
+            elif x.ndim == 3 and x.shape[-1] == 1:
+                x = np.squeeze(x, axis=-1)
+            # PIL Image.fromarray only supports uint8 or certain types, 
+            # and shapes like (H, W, 3) or (H, W).
+            # If shape is [C, H, W], convert to [H, W, C] for PIL
+            if x.ndim == 4 and x.shape[1] in [1, 3] and x.shape[-1] not in [1, 3]: # [T, C, H, W]
+                x = np.transpose(x, (0, 2, 3, 1))
+            elif x.ndim == 3 and x.shape[0] in [1, 3] and x.shape[-1] not in [1, 3]: # [C, H, W]
+                x = np.transpose(x, (1, 2, 0))
+            return x
+        
+        data["image"] = {k: image_tools.resize_with_pad(_to_numpy(v), self.height, self.width) for k, v in data["image"].items()}
         return data
 
 
@@ -213,9 +237,12 @@ class DeltaActions(DataTransformFn):
         if "actions" not in data or self.mask is None:
             return data
 
-        state, actions = data["state"], data["actions"]
         mask = np.asarray(self.mask)
-        dims = mask.shape[-1]
+        actions = np.asarray(data["actions"])
+        state = np.asarray(data["state"])
+        dims = min(actions.shape[-1], state.shape[-1], mask.shape[-1])
+        
+        actions = actions.copy()
         actions[..., :dims] -= np.expand_dims(np.where(mask, state[..., :dims], 0), axis=-2)
         data["actions"] = actions
 

@@ -1,6 +1,7 @@
 import dataclasses
 import functools
 import logging
+logging.basicConfig(level=logging.INFO)
 import platform
 from typing import Any
 
@@ -9,7 +10,6 @@ import flax.nnx as nnx
 from flax.training import common_utils
 import flax.traverse_util as traverse_util
 import jax
-import jax.experimental
 import jax.numpy as jnp
 import numpy as np
 import optax
@@ -88,6 +88,7 @@ def init_train_state(
     tx = _optimizer.create_optimizer(config.optimizer, config.lr_schedule, weight_decay_mask=None)
 
     def init(rng: at.KeyArrayLike, partial_params: at.Params | None = None) -> training_utils.TrainState:
+        import jax.numpy as jnp
         rng, model_rng = jax.random.split(rng)
         # initialize the model (and its parameters).
         model = config.model.create(model_rng)
@@ -101,6 +102,7 @@ def init_train_state(
 
         params = nnx.state(model)
         # Convert frozen params to bfloat16.
+        import jax.numpy as jnp
         params = nnx_utils.state_map(params, config.freeze_filter, lambda p: p.replace(p.value.astype(jnp.bfloat16)))
 
         return training_utils.TrainState(
@@ -123,12 +125,12 @@ def init_train_state(
     replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
     # Initialize the train state and mix in the partial params.
-    train_state = jax.jit(
-        init,
-        donate_argnums=(1,),  # donate the partial params buffer.
-        in_shardings=replicated_sharding,
-        out_shardings=state_sharding,
-    )(init_rng, partial_params)
+    # 显存救命核心：强迫 JAX 放弃对参数初始化的 JIT 编译
+    # 并在启动时强行设置全局半精度计算来削减一半的激活显存
+    import jax.numpy as jnp
+    jax.config.update('jax_default_matmul_precision', 'bfloat16')
+    
+    train_state = init(init_rng, partial_params)
 
     return train_state, state_sharding
 
@@ -211,6 +213,7 @@ def main(config: _config.TrainConfig):
 
     checkpoint_manager, resuming = _checkpoints.initialize_checkpoint_dir(
         config.checkpoint_dir,
+        save_interval=config.save_interval,
         keep_period=config.keep_period,
         overwrite=config.overwrite,
         resume=config.resume,
@@ -226,12 +229,13 @@ def main(config: _config.TrainConfig):
     batch = next(data_iter)
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
-    # Log images from first batch to sanity check.
-    images_to_log = [
-        wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
-        for i in range(min(5, len(next(iter(batch[0].images.values())))))
-    ]
-    wandb.log({"camera_views": images_to_log}, step=0)
+    if config.wandb_enabled:
+        # Log images from the first batch only when wandb is enabled.
+        images_to_log = [
+            wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
+            for i in range(min(5, len(next(iter(batch[0].images.values())))))
+        ]
+        wandb.log({"camera_views": images_to_log}, step=0)
 
     train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming)
     jax.block_until_ready(train_state)
@@ -265,12 +269,14 @@ def main(config: _config.TrainConfig):
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
             info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
             pbar.write(f"Step {step}: {info_str}")
-            wandb.log(reduced_info, step=step)
+            if config.wandb_enabled:
+                wandb.log(reduced_info, step=step)
             infos = []
         batch = next(data_iter)
 
+        current_step = int(train_state.step)
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
-            _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
+            _checkpoints.save_state(checkpoint_manager, train_state, data_loader, current_step)
 
     logging.info("Waiting for checkpoint manager to finish")
     checkpoint_manager.wait_until_finished()

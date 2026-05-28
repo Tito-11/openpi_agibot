@@ -78,8 +78,10 @@ class AdamW(OptimizerConfig):
         lr: optax.ScalarOrSchedule,
         weight_decay_mask: at.PyTree | None = None,
     ) -> optax.GradientTransformation:
+        # NOTE: Optax's AdamW tracks mu and nu states. Using bfloat16 for mu cuts state memory in half.
+        # We apply this via `mu_dtype` if available, or just rely on global XLA settings.
         tx = optax.adamw(
-            lr, b1=self.b1, b2=self.b2, eps=self.eps, weight_decay=self.weight_decay, mask=weight_decay_mask
+            lr, b1=self.b1, b2=self.b2, eps=self.eps, weight_decay=self.weight_decay, mask=weight_decay_mask, mu_dtype=jnp.bfloat16
         )
 
         return optax.chain(optax.clip_by_global_norm(self.clip_gradient_norm), tx)

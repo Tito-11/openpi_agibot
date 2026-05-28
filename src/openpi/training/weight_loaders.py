@@ -87,18 +87,43 @@ def _merge_params(loaded_params: at.Params, params: at.Params, *, missing_regex:
     flat_ref = flax.traverse_util.flatten_dict(params, sep="/")
     flat_loaded = flax.traverse_util.flatten_dict(loaded_params, sep="/")
 
-    # First, take all weights that are a subset of the reference weights.
+    # First, take all weights that are a subset of the reference weights and have matching shapes.
+    # If a parameter exists in both trees but the shape differs, keep the reference parameter
+    # initialization. This is needed when fine-tuning from a base checkpoint while changing
+    # task-specific dimensions such as `action_dim`.
     result = {}
+    skipped_shape_mismatch = []
     for k, v in flat_loaded.items():
         if k in flat_ref:
-            result[k] = v.astype(flat_ref[k].dtype) if v.dtype != flat_ref[k].dtype else v
+            ref_v = flat_ref[k]
+            if getattr(v, "shape", None) != getattr(ref_v, "shape", None):
+                skipped_shape_mismatch.append((k, getattr(ref_v, "shape", None), getattr(v, "shape", None)))
+                continue
+            result[k] = v.astype(ref_v.dtype) if v.dtype != ref_v.dtype else v
 
     flat_loaded.clear()
+
+    if skipped_shape_mismatch:
+        for key, expected_shape, loaded_shape in skipped_shape_mismatch:
+            logger.warning(
+                "Skipping checkpoint parameter %s due to shape mismatch: expected %s, got %s. "
+                "Using current model initialization instead.",
+                key,
+                expected_shape,
+                loaded_shape,
+            )
 
     # Then, merge any missing weights as defined by the missing regex.
     pattern = re.compile(missing_regex)
     for k in {k for k in flat_ref if pattern.fullmatch(k)}:
         if k not in result:
             result[k] = flat_ref[k]
+
+    # Finally, fill in any remaining keys from the reference params. This keeps training
+    # robust when the base checkpoint does not contain task-specific or shape-mismatched
+    # parameters introduced by the current config.
+    for k, v in flat_ref.items():
+        if k not in result:
+            result[k] = v
 
     return flax.traverse_util.unflatten_dict(result, sep="/")

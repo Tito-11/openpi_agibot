@@ -1,144 +1,56 @@
-# Agibot 智元机器人数据微调 OpenPI (π0) 实验记录
+# Agibot `pi0.5` 实验记录（精简版）
 
-**最后更新日期**: 2026年4月18日
+本文件只保留关键里程碑与“最终有效结论”。具体可复用流程以 [pipeline_guide.md](file:///home/admin1/ct/openpi_agibot/agi_bot/pipeline_guide.md) 为准。
 
-## 实验目标
-使用智元机器人 (Agibot) 采集的数据集 (`agi_bot/data/cartesian_grasp_routeB_5pt_clean_v2`)，在 openpi 框架中对 `π0 Base Model` 进行微调训练 (Fine-Tuning)。本次训练已确认采用 **LoRA 低秩微调**，必须万无一失，确保可成功部署在智元机器人上。根据策略，先采用大迭代步数训练观察Loss收敛趋势。
+## 1. 最终结论（当前有效）
 
----
+- 端到端链路已打通：数据转换 → 训练 → 离线验证 → 真机在线推理闭环
+- 任务：抓取四个铝型条中最左边的
+- 表示：`8D = xyz + quat(xyzw) + gripper(0/1)`
+- 推理默认 checkpoint：`20000`
+- 真机抓取闭合使用：`action-index=9`
+- 真机已观测到：在线推理成功抓住并回退（非数据重放）
 
-## 已完成的进度
+## 2. 数据与配置（当前主线）
 
-### 1. 数据集梳理与格式转换器准备
-- **数据探索**: 分析了 Agibot 原始数据。确认包含了 `actions` (8维), `states` (8 维), 以及两个视角的相机视频 (`camera_0.mp4` 作为头部相角, `camera_1.mp4` 作为手臂视角)，单帧图像分辨率为 `(240, 320, 3)` RGB。
-- **转换脚本**: 编写并深度排查了格式转换脚本 `agi_bot/convert_agibot_data_to_lerobot.py`。
-  - 使用 `cv2` 处理视频抽帧，构建支持 openpi 训练框架的数据集 `agibot_routeB`。
-  - 将转换脚本中硬编码的 `task="pick up the object"` 变更为 `"grasp_bottle"`，并因应 `lerobot.common.datasets.lerobot_dataset.LeRobotDataset` 版本迭代将任务标签放置入 `dataset.add_frame()` 的特征字典中，通过在数据帧记录 `task` 解决特征匹配不足的 ValueError。
+- 原始数据：`agi_bot/agi_data/g2_data`
+- LeRobot 数据集：`agi_bot/lerobot_datasets/g2_leftmost_aluminum_profile_grasp_pi05_quat`
+- Prompt：`grasp the leftmost aluminum profile among the four aluminum profiles`
+- 训练配置：`pi05_agibot_g2_leftmost_aluminum_profile_grasp_a100x4`
+- 数据转换摘要：
+  - `51` episodes
+  - `frames_aligned_total = 10362`
+  - `frames_kept_total = 7263`
+  - `idle_removed_ratio = 0.2991`
 
-### 3. OpenPI Docker 环境变量排雷及网络加速方案部署
-- **W&B API 密钥环境注入修复**: 
-  - 第一轮运行尝试通过命令行终端粘贴 Wandb V1 版的 72 位 API Key。受制于老旧 SDK 版本的 40 字符校验异常，在 Python 解释器内引发 `ValueError`。
-  - **解决方案**: 为 Docker 的配置修改为向其传递 `-e WANDB_API_KEY` 环境变量配置，彻底绕过了由于命令行输入阶段因字符截断校验导致的训练器异常退出问题，让训练能够成功上推至云端实时监控大盘。
-- **预训练 Checkpoint 突破墙下载速度阻碍 (持久化映射)**: 
-  - 本框架依赖的 `pi0_base` 先验模型参数有 11.2GB。当系统自动通过 `gcsfs` 后备机制下载极易超时，且 `--rm` 的 Docker 会在意外后直接删掉宝贵的临时层缓存。
-  - **解决方案**: 通过全局调用 `gsutil -m cp` 实现多线程直链并发，加速把数据固化在宿主机的 `~/.cache/openpi/` 中；之后通过 `-v ~/.cache/openpi:/root/.cache/openpi` 实现了模型热启动。
-  - **网络代理导致哈希损坏报错修复**: 国内多线程挂载代理直连谷歌云盘时易产生残存的断点和 checksum 错乱 (导致 `CommandException` 和 `crc32c signature doesn't match`)。最终确认通过 `gsutil -o "GSUtil:check_hashes=never" -m cp -r` 直接关闭 `gsutil` 的云端强一致哈希校验顺利下载了完整的 11GB 权重字典文件。
-  - **解压损坏修复**: 由于使用 `check_hashes=never`，下载被代理截断时可能会生成损坏的分片。这导致在读取 `params.PaliGemma.llm...` 时爆出 `ZSTD_decompressStream() failed` 错误。我们编写了一个 Python 脚本对比本地与云端 `gsutil ls -L` 的 MD5 值，并筛出了缺失的分片，成功找出了 `fec292...` 及 `93fcf3...` 的损坏/缺失分片，重新下载后恢复了 11.2GB Checkpoint 的完整性。
+## 3. 训练与 checkpoint
 
-## 待完成事项
-  - 经源码追踪，`ModelTransformFactory` 已自动注入 `PadStatesAndActions`，进行零填充对齐。在推理输出端，`AgibotOutputs` 会将 32 维裁剪回 10 维以适配真机。
-- **LoRA 模式开启与主干网络冻结**:
-  - 在 `src/openpi/training/config.py` 中将 `paligemma_variant="gemma_2b"` 与 `action_expert_variant="gemma_300m_lora"` 加入到模型参数结构中。
-  - **策略考量**：虽然硬件条件充裕（A100 + 4090），但由于当前抓取任务场景单一，为防止 2B 参数的 VLM 主干发生灾难性遗忘（Catastrophic Forgetting）从而丢失预训练的开阔世界视觉常识，我们决定**彻底冻结 PaliGemma**，不为其分配任何可训练参数。
-  - **实现方式**：配置 `freeze_filter` 并去掉 `paligemma_variant` 的 `_lora` 后缀。模型在训练时仅让 300M 参数的 Action Expert 适应智元机器人的动作流。设定 `ema_decay=None` (LoRA无须EMA参数平滑)。
+- 训练摘要（配置级别）：
+  - `action_horizon=10`
+  - `batch_size=32`
+  - `num_train_steps=30000`
+  - `save_interval=10000`
+  - LoRA 微调（冻结 `PaliGemma`，训练 `Action Expert`）
+- 本轮训练末尾未落盘 `30000`，推理优先使用 `20000`
+- 推理 checkpoint 精简策略：仅保留 `params/` + `assets/`（删除 `train_state/`）
 
-### 3. 长周期观察训练参数设定 (30,000步)
-- 按照经验，对于机器人的复杂或未定性数据，先开启长周期的 3w 步观察 loss 的下降（通过 `wandb_enabled=True`）是最稳妥的初步动作评估法。
-- 参数设定 (`pi0_agibot` 配置修改)：
-  - **总步数 (steps)**: 修改 `num_train_steps=30000`。
-  - **保存频率 (Checkpoint)**: 设定 `save_interval=2000`，每 2000步 将当前的最优权重保存在本地 (不覆盖, `keep_period=2000` 保留节点)。
-  - **回显频率 (Logging)**: 设定 `log_interval=10`，每 10步 在终端以及 WandB 打点记录。
-  - **衰减与热身**: 设定 `warmup_steps=1000` 和 `decay_steps=30000`，允许平滑收敛。
+## 4. 离线推理验证（用训练数据）
 
-### 4. Docker 运行环境攻坚完成
-- 经过复杂网络环境（Great Firewall）调整，修改了 `serve_policy.Dockerfile`：
-  - 成功汇入清华 TUNA APT 源、Daocloud 镜像站、Ubuntu deadsnakes PPA。
-  - **Docker 镜像 `openpi_server:latest` 构建已 100% 成功并保存在本地**。
+- 抽样评估（training samples）结论：末端位姿误差在厘米级以内，夹爪准确率高（详见输出 JSON）
+  - `agi_bot/infer_results/offline_eval_training_samples_20000.json`
+- episode 回放评估结论（2 episodes）：位置 mean ~ `0.79cm`，姿态 mean ~ `2.80°`，夹爪 accuracy ~ `99.6%`
+  - `agi_bot/infer_results/offline_eval_episode_replay_20000.json`
 
----
+## 5. 真机联动（关键问题与最终修正）
 
-## 随时可开始的操作指令 (Execution Guide)
-
-代码与参数均设为完美绿灯状态，进入 Docker 即可开跑：
-
-**第一步：进入 Docker 容器 (挂载全部代码、数据和 GPU)**
-```bash
-sudo docker run --rm -it --network=host -v $PWD:/app --gpus=all openpi_server /bin/bash
-```
-
-**(以下命令均在容器内执行)**
-
-**第二步：基于wandb登录打通在线面板 (只需执行一次) **
-```bash
-uv run wandb login
-```
-
-**第三步：将原始数据构建为 LeRobot 格式数据集**
-```bash
-uv run agi_bot/convert_agibot_data_to_lerobot.py --data_dir agi_bot/data/cartesian_grasp_routeB_5pt_clean_v2
-```
-
-**第四步：计算数据集归一化参数 (Norm Stats)**
-```bash
-uv run scripts/compute_norm_stats.py --config-name pi0_agibot
-```
-
-**第五步：启动 π0 LoRA 微调训练 (约 30000 Steps)**
-```bash
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi0_agibot --exp-name=agibot_routeB_lora_tuning --overwrite
-```
-## 更新历史
-*   2026-04-16: 修正了数据集 `task` 的格式绑定问题，成功绕开 wandb_api_key 版本验证 `ValueError` bug。搭建了 `gsutil` 并发下载挂载机制，极大提高了参数冷启动的速度。
-*   2026-04-17: 成功修复了因下载断点引发的 Checkpoint md5sum crc 不一致导致的解压失败问题。打通了整条训练链路，并编写了针对物理边缘部署端的纯 Numpy 数组解构测试脚本 `run_inference.py`。
-*   2026-04-18: 构建局部数据解构测试 `test_convert_episode_0001.py`。完成了 LeRobot 格式文件结构深度鉴定，解明了图像数据 (`image/wrist_image`) 直接作为 Byte 二进制格式流存储于 `.parquet` 的架构本质，并证实该方案大幅降低了视频型 `videos/` 零碎外挂结构造成的离散 I/O 开销，已被 OpenPI 的 `datasets` 数据泵完美验证。
-*   2026-05-09: 完善针对夹爪离散数据 (0/1) 以及四元数旋转的适配逻辑，并全面引入高质量数据清洗。
-  - **Idle 帧数据清洗**: 编写并集成了 `compute_valid_indices` 函数至转换脚本。现在会自动通过阈值 (`1e-3`) 计算平移量的变化，剔除连续静止超过 7 帧以上的无意义数据。这极大地防止了模型在预测时输出停滞不前的动作块，并大幅提升了数据纯度。
-  - **夹爪逻辑**: 编写了 `agibot_policy.py` 创建专属输入输出 Transform。在推理脚本中加入了二值化门限逻辑（大于0.5视为1）。
-  - **全面升级为 6D 旋转矩阵 (6D Rotation)**: 为了彻底解决四元数双重覆盖导致的旋转不连续问题，我们在数据转换脚本中通过 `scipy.spatial.transform.Rotation` 引入了 6D 连续旋转表示法。这使得动作空间从 8 维扩充到了 10 维。
-  - **TrainConfig 全空间 Delta 解耦**: 得益于 6D 旋转的欧几里得连续特性，我们现在可以对前 9 维（x,y,z + 6D旋转）全面启用线性增量预测 `StateActionToDelta(action_dim=9)`。第 10 维夹爪依然保留绝对值预测。
-  - **推理端还原体系**: 在 `run_inference.py` 中加入了 Gram-Schmidt 正交化算法，将神经网络预测出的 6D 向量无损还原回 3x3 旋转矩阵，并最终退回给底层控制硬件所需的 8 维 `[x,y,z, w,x,y,z, gripper]` 数组。
-
-### 5. 推理 (Inference) 脚本制备
-- 在等待模型顺畅训练期间，已编写脱离机器人的推理测试框架文件。
-- **文件路径**: [agi_bot/run_inference.py](agi_bot/run_inference.py)
-- **部署指南**: [agi_bot/README_INFERENCE.md](agi_bot/README_INFERENCE.md)
-  - 通过 `pi0_agibot` config 调用 `.infer()`，构建了基于当前检查点的纯 Numpy / JAX Array 数组的测试伪造输入 (`observation/image`, `observation/wrist_image`, `observation/state`)。
-  - 通过 `AgibotOutputs` Transform 方法拦截 32 维的张量底层返回，顺利裁切还原成智元原装的 `np.ndarray (10, 8)` Action Chunk 动作块进行机械臂直接发包执行。
-  - **夹爪动作二值化**: 由于 Flow Matching 模型输出的是连续的浮点数值，而在 Agibot 的定义中第 8 维夹爪仅接受 `0`（张开）和 `1`（闭合）。我们在推理端加入了 `np.where(actions_chunk[:, 7] > 0.5, 1.0, 0.0)` 进行硬切分二值化。
-
-### 6. 代码版本控制与跨设备迁移 (2026-04-17)
-- **GitHub 远端托管**: 已通过 `git push` 将除 `checkpoints/` 和 `data/` 以外的所有核心代码、配置文件和推理脚本成功同步至 GitHub 仓库 (`https://github.com/Tito-11/openpi_agibot.git`)。
-- **配置白名单**: 仓库中的 `.gitignore` 规则成功拦截了大体积二进制文件（包含模型权重和训练数据集），避免触发 GitHub 的 100MB 单文件限制。
-- **跨平台环境配置说明**: 绝对不可将当前机器的 `.venv`、本地缓存 `.pytest_cache` 以及日志 `wandb/` 上传至 GitHub，因为包含了宿主机的系统绝对路径以及特定架构的 C++ 动态链接库。在新设备上需要**原生的环境重建**。
-- **权重提取与云盘流转**: 训练在约 28000 步左右参数完全收敛，已在此提取最高质量权重 `checkpoints/pi0_agibot/agibot_routeB_lora_tuning/28000` 文件夹并上传至个人云盘，明天的物理跨机器设备推理测试将直接从此存档加载。
-
-### 7. 异地新设备一键拉起部署指南
-为了防止明天在新电脑上测试时出现依赖环境错乱问题，请直接遵守以下环境原生重构流程：
-
-**第一步：在旧机器压缩导出权重**
-```bash
-# 于项目主目录下执行，将指定权重打包压缩，以便安全且快速地上云盘
-tar -czvf agibot_checkpoint_28000.tar.gz -C checkpoints/pi0_agibot/agibot_routeB_lora_tuning 28000
-```
-把生成的 `agibot_checkpoint_28000.tar.gz` 上传至个人云盘。
-
-**第二步：在新机器拉取纯净代码并接管环境**
-```bash
-git clone https://github.com/Tito-11/openpi_agibot.git
-cd openpi_agibot
-# 原生重建虚拟环境：此命令会根据新电脑底层架构，干净自动生成 .venv 并处理好 JAX 与链接库等依赖。
-uv pip install -e .
-```
-
-**第三步：在新机器解压还原权重**
-从个人云盘下载 `agibot_checkpoint_28000.tar.gz` 到项目主目录，执行：
-```bash
-mkdir -p checkpoints/pi0_agibot/agibot_routeB_lora_tuning/
-tar -xzvf agibot_checkpoint_28000.tar.gz -C checkpoints/pi0_agibot/agibot_routeB_lora_tuning/
-```
-此操作将自动生成 `/checkpoints/pi0_agibot/agibot_routeB_lora_tuning/28000/` 的纯净架构。
-
-**第四步：直接执行推理验证**
-```bash
-uv run agi_bot/run_inference.py
-```
-
-### 8. 数据集存储格式架构验证 (2026-04-18)
-为了回答 "生成的 LeRobot 格式文件里为什么没有 `videos` 目录以及视觉数据藏在哪里" 这个问题，我们单独抽离了 `episode_0001` 进行轻量化本地验证：
-- **测试拦截脚本**: `agi_bot/test_convert_episode_0001.py` 
-- **设计原理**: 
-  - 本框架在 `LeRobotDataset` 转换期间使用的键值定义为 `dtype="image"`，而非网络部分教程所使用的 `dtype="video"`。
-  - 这导致了高达 240x320x3 的多模态阵列视觉帧会被抽帧为单一图像，然后直接编码为二进制 Byte 流（bytes）。
-- **结论**: 
-  - 此架构并未丢失任何视觉画面，而是将所有图片直接序列化硬塞到了 `agi_bot/test_converted_data/test_episode_0001/data/chunk-000/episode_000000.parquet` 的数据库文件中。
-  - 对于 π0 训练的流式前处理而言，这种被高度压缩封装的列式存储格式反而极大地缓解了机械硬盘 / 网络流传中的小文件碎块拖慢 I/O 效率之问题。可以完美适配 OpenPI 底层的 GPU 多进程喂数据框架。
+- 关键控制路径以控制器脚本为准：
+  - `agi:/data/pi05_test/g2_data_collector_v2.py`
+- 真机控制必要条件（已验证）：
+  - TF：`arm_l_end_link`（右臂固定并用 `kBothArms` 下发）
+  - pose 需要短时间窗重复下发（类似 `servo_move()`）
+- 夹爪闭合问题：
+  - `action-index=1..7` 无闭合预测
+  - `action-index=9` 才稳定触发闭合与抓取
+- 启动稳定性：
+  - 推理前显式张开夹爪更稳定
+  - 一键启动必须“先复位再推理”（已修复 env 初始化导致的早退，以及远端日志路径变量冲突）

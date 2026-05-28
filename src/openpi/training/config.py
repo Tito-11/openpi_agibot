@@ -358,52 +358,145 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 
 @dataclasses.dataclass(frozen=True)
 class LeRobotAgibotDataConfig(DataConfigFactory):
+    repo_id: str = "agibot/grasp_bottle"
+    default_prompt: str = "put the bottle into the box"
+
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        repack_transform = _transforms.Group(
-            inputs=[
-                _transforms.RepackTransform(
-                    {
-                        "observation/image": "image",
-                        "observation/wrist_image": "wrist_image",
-                        "observation/state": "state",
-                        "actions": "actions",
-                        "prompt": "prompt",
-                    }
-                )
-            ]
-        )
-
         data_transforms = _transforms.Group(
-            inputs=[agibot_policy.AgibotInputs(model_type=model_config.model_type)],
+            inputs=[agibot_policy.AgibotInputs()],
             outputs=[agibot_policy.AgibotOutputs()],
         )
 
-        # Apply Delta transform to first 9 dims (XYZ + 6D Rot)
-        delta_action_mask = _transforms.make_bool_mask(9, -1)
+        # Apply Delta transform to all 9 dims (XYZ + 6D Rot)
+        delta_action_mask = _transforms.make_bool_mask(9)
         data_transforms = data_transforms.push(
             inputs=[_transforms.DeltaActions(mask=delta_action_mask)],
             outputs=[_transforms.AbsoluteActions(mask=delta_action_mask)],
         )
 
-        model_transforms = ModelTransformFactory()(model_config)
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
 
-        base_config = self.create_base_config(assets_dirs, model_config)
-        
-        # Disable normalization for 6D Rotation (dims 3..8) and Gripper (dim 9)
-        norm_stats = base_config.norm_stats
-        if norm_stats is not None:
+        base_config = dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            action_sequence_keys=("actions",),
+        )
+
+        # 免除不必要的归一化：对 6D 旋转矩阵 (dims 3:9) 和夹爪 (dim 9) 不做归一化
+        if base_config.norm_stats is not None:
             import numpy as np
             for key in ["state", "actions"]:
-                if key in norm_stats:
-                    stats = norm_stats[key]
-                    if stats.mean is not None and stats.mean.shape[-1] >= 10:
-                        stats.mean[..., 3:10] = 0.0
-                        stats.std[..., 3:10] = 1.0 - 1e-6
+                if key in base_config.norm_stats:
+                    stats = base_config.norm_stats[key]
+                    # 复制以避免修改原对象
+                    new_mean = np.copy(np.asarray(stats.mean))
+                    new_std = np.copy(np.asarray(stats.std))
+                    # XYZ 保留，6D旋转和夹爪设为不归一化 (mean=0, std=1)
+                    new_mean[..., 3:] = 0.0
+                    new_std[..., 3:] = 1.0
+                    
+                    new_q01, new_q99 = None, None
+                    if stats.q01 is not None and stats.q99 is not None:
+                        new_q01 = np.copy(np.asarray(stats.q01))
+                        new_q99 = np.copy(np.asarray(stats.q99))
+                        new_q01[..., 3:] = -1.0
+                        new_q99[..., 3:] = 1.0
+                        
+                    base_config.norm_stats[key] = dataclasses.replace(
+                        stats,
+                        mean=new_mean,
+                        std=new_std,
+                        q01=new_q01,
+                        q99=new_q99,
+                    )
 
         return dataclasses.replace(
             base_config,
-            repack_transforms=repack_transform,
+            repo_id=self.repo_id,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform({
+                        "images": {"head_color": "image", "hand_left_color": "wrist_image"},
+                        "state": "state",
+                        "actions": "actions"
+                    }),
+                ]
+            ),
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotAgibotPi05QuatDataConfig(DataConfigFactory):
+    repo_id: str = "grasp_bottle_test_pi05_quat"
+    default_prompt: str = "put the bottle into the box"
+    use_delta_xyz_actions: bool = False
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        data_transforms = _transforms.Group(
+            inputs=[agibot_policy.AgibotInputs()],
+            outputs=[agibot_policy.AgibotOutputs(action_dim=8)],
+        )
+
+        if self.use_delta_xyz_actions:
+            delta_action_mask = _transforms.make_bool_mask(3, -5)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(mask=delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(mask=delta_action_mask)],
+            )
+
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        base_config = dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            action_sequence_keys=("actions",),
+        )
+
+        if base_config.norm_stats is not None:
+            import numpy as np
+
+            for key in ["state", "actions"]:
+                if key not in base_config.norm_stats:
+                    continue
+                stats = base_config.norm_stats[key]
+                new_mean = np.copy(np.asarray(stats.mean))
+                new_std = np.copy(np.asarray(stats.std))
+                new_mean[..., 3:] = 0.0
+                new_std[..., 3:] = 1.0
+
+                new_q01, new_q99 = None, None
+                if stats.q01 is not None and stats.q99 is not None:
+                    new_q01 = np.copy(np.asarray(stats.q01))
+                    new_q99 = np.copy(np.asarray(stats.q99))
+                    new_q01[..., 3:7] = -1.0
+                    new_q99[..., 3:7] = 1.0
+                    new_q01[..., 7:] = 0.0
+                    new_q99[..., 7:] = 1.0
+
+                base_config.norm_stats[key] = dataclasses.replace(
+                    stats,
+                    mean=new_mean,
+                    std=new_std,
+                    q01=new_q01,
+                    q99=new_q99,
+                )
+
+        return dataclasses.replace(
+            base_config,
+            repo_id=self.repo_id,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {"head_color": "image", "hand_left_color": "wrist_image"},
+                            "state": "state",
+                            "actions": "actions",
+                        }
+                    ),
+                ]
+            ),
             data_transforms=data_transforms,
             model_transforms=model_transforms,
         )
@@ -588,6 +681,8 @@ class TrainConfig:
     # data parallel between 2 groups of devices.
     fsdp_devices: int = 1
 
+    gradient_accumulation_steps: int = 1
+
     @property
     def assets_dirs(self) -> pathlib.Path:
         """Get the assets directory for this config."""
@@ -709,13 +804,13 @@ _CONFIGS = [
             action_horizon=10, 
             discrete_state_input=False,
             paligemma_variant="gemma_2b",  # 取消 _lora，意味着完全不引入微调层
-            action_expert_variant="gemma_300m_lora" # 仅给 Action Expert 引入微调层
+            action_expert_variant="gemma_300m_lora", # 仅给 Action Expert 引入微调层
         ),
         data=LeRobotAgibotDataConfig(
-            repo_id="agibot_routeB",
-            base_config=DataConfig(prompt_from_task=True),
+            repo_id="agibot/grasp_bottle",
+            base_config=DataConfig(prompt_from_task=False),
         ),
-        batch_size=32,
+        batch_size=1, # 最极端的单步批次
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1000,
             peak_lr=5e-5,
@@ -736,6 +831,86 @@ _CONFIGS = [
         save_interval=2000,
         log_interval=10,
         keep_period=2000,
+        wandb_enabled=False,
+        # 终极显存拯救方案：强行降低全局精度并冻结更多层
+    ),
+    TrainConfig(
+        name="pi0_agibot_grasp_bottle_test",
+        model=pi0_config.Pi0Config(
+            pi05=False,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotAgibotDataConfig(
+            repo_id="agibot/grasp_bottle_test",
+            default_prompt="put the bottle into the box",
+            base_config=DataConfig(prompt_from_task=False),
+        ),
+        # A100 单卡的稳妥默认值；如前几百步显存稳定，可再上调到 8。
+        batch_size=4,
+        num_workers=4,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1000,
+            peak_lr=5e-5,
+            decay_steps=30000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=False,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30000,
+        save_interval=10000,
+        log_interval=10,
+        keep_period=10000,
+        wandb_enabled=True,
+    ),
+    TrainConfig(
+        name="pi0_agibot_grasp_bottle_test_a100x2",
+        model=pi0_config.Pi0Config(
+            pi05=False,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotAgibotDataConfig(
+            repo_id="agibot/grasp_bottle_test",
+            default_prompt="put the bottle into the box",
+            base_config=DataConfig(prompt_from_task=False),
+        ),
+        # 双卡 A100 的推荐起点：全局 batch=16，配合 FSDP=2 做 LoRA 微调。
+        batch_size=16,
+        num_workers=8,
+        fsdp_devices=2,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1000,
+            peak_lr=5e-5,
+            decay_steps=30000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=False,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30000,
+        save_interval=10000,
+        log_interval=10,
+        keep_period=10000,
         wandb_enabled=True,
     ),
     TrainConfig(
@@ -850,6 +1025,90 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
+    ),
+    TrainConfig(
+        name="pi05_agibot_grasp_bottle_quat_a100x4",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=8,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotAgibotPi05QuatDataConfig(
+            repo_id="grasp_bottle_test_pi05_quat",
+            default_prompt="put the bottle into the box",
+            use_delta_xyz_actions=False,
+            base_config=DataConfig(prompt_from_task=False),
+        ),
+        batch_size=32,
+        num_workers=8,
+        fsdp_devices=4,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=3e-5,
+            decay_steps=30_000,
+            decay_lr=3e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=8,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        save_interval=10_000,
+        log_interval=10,
+        keep_period=10_000,
+        wandb_enabled=True,
+    ),
+    TrainConfig(
+        name="pi05_agibot_g2_leftmost_aluminum_profile_grasp_a100x4",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=8,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotAgibotPi05QuatDataConfig(
+            repo_id="g2_leftmost_aluminum_profile_grasp_pi05_quat",
+            default_prompt="grasp the leftmost aluminum profile among the four aluminum profiles",
+            use_delta_xyz_actions=False,
+            base_config=DataConfig(prompt_from_task=False),
+        ),
+        batch_size=32,
+        num_workers=8,
+        fsdp_devices=4,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=3e-5,
+            decay_steps=30_000,
+            decay_lr=3e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=8,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        save_interval=10_000,
+        log_interval=10,
+        keep_period=10_000,
+        wandb_enabled=True,
     ),
     #
     # Fine-tuning Aloha configs.
@@ -1009,8 +1268,10 @@ _CONFIGS = [
     #
     # ALOHA Sim configs. This config is used to demonstrate how to train on a simple simulated environment.
     #
+    # Config for fine-tuning pi0.
     TrainConfig(
         name="pi0_aloha_sim",
+        exp_name="pi0_aloha_sim",
         model=pi0_config.Pi0Config(),
         data=LeRobotAlohaDataConfig(
             repo_id="lerobot/aloha_sim_transfer_cube_human",
@@ -1019,6 +1280,9 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=20_000,
+        batch_size=2,
+        log_interval=10,
+        save_interval=2000,
     ),
     #
     # Debugging configs.

@@ -3,6 +3,12 @@ assets/
 checkpoints/
 data/
 wandb/
+agi_bot/agi_data/
+agi_bot/lerobot_datasets/
+agi_bot/infer_results/
+.runtime_logs/
+prompt.md
+agi_bot/rules.md
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

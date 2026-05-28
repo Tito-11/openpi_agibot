@@ -118,9 +118,17 @@ class Observation(Generic[ArrayT]):
                 data["image"][key] = data["image"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
             elif hasattr(data["image"][key], "dtype") and data["image"][key].dtype == torch.uint8:
                 data["image"][key] = data["image"][key].to(torch.float32).permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
+        
+        # Ensure image_masks exists and covers all images. Default to True (mask=valid).
+        image_masks = data.get("image_mask", {})
+        for key in data["image"]:
+            if key not in image_masks:
+                # If image is provided, it's valid (True) by default.
+                image_masks[key] = np.ones(data["image"][key].shape[:data["image"][key].ndim - 3], dtype=bool)
+
         return cls(
             images=data["image"],
-            image_masks=data["image_mask"],
+            image_masks=image_masks,
             state=data["state"],
             tokenized_prompt=data.get("tokenized_prompt"),
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),

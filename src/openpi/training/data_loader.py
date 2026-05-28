@@ -137,6 +137,10 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
+    import lerobot.common.datasets.utils as lerobot_utils
+    lerobot_utils.get_repo_versions = lambda *args, **kwargs: ["3.0"]
+    lerobot_utils.get_safe_version = lambda *args, **kwargs: "3.0"
+
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
